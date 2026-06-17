@@ -202,17 +202,16 @@ def create_pdf(text):
         # Fallback to default
         pdf.set_font("Helvetica", size=12)
         
+    import re
     for line in text.split('\n'):
+        # Sanitize: replace long sequences of dashes, equals, or underscores (markdown artifacts)
+        line = re.sub(r'[-_=]{10,}', '---', line)
+        
         # Multi_cell helps with line wrapping
-        # Catch errors if a line has unbreakable sequences wider than the page
         try:
-            pdf.multi_cell(w=0, h=8, text=line, wrapmode="CHAR")
+            pdf.multi_cell(w=0, h=8, text=line)
         except Exception:
-            try:
-                # Fallback without wrapmode or truncate
-                pdf.multi_cell(w=0, h=8, text=line[:100] + "...")
-            except:
-                pass
+            pass
         
     return bytearray(pdf.output())
 
