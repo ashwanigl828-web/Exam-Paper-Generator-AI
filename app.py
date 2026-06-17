@@ -213,7 +213,7 @@ def create_pdf(text):
         except Exception:
             pass
         
-    return bytearray(pdf.output())
+    return bytes(pdf.output())
 
 # --- Main App UI ---
 def main():
