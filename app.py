@@ -6,7 +6,10 @@ import requests
 import io
 import json
 import markdown
+import tempfile
+import os
 from dotenv import load_dotenv
+from fpdf import FPDF
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -35,7 +38,28 @@ if GEMINI_API_KEY:
 else:
     client = None
 
-# Fonts will be loaded via CSS from Google Fonts for WeasyPrint
+FONT_URL_LATIN = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf"
+FONT_PATH_LATIN = os.path.join(tempfile.gettempdir(), "NotoSans-Regular.ttf")
+
+FONT_URL_HINDI = "https://github.com/google/fonts/raw/main/ofl/notosansdevanagari/NotoSansDevanagari%5Bwdth%2Cwght%5D.ttf"
+FONT_PATH_HINDI = os.path.join(tempfile.gettempdir(), "NotoSansDevanagari-Regular.ttf")
+
+def download_font():
+    """Download the fonts if they don't exist locally."""
+    try:
+        if not os.path.exists(FONT_PATH_LATIN):
+            r = requests.get(FONT_URL_LATIN)
+            if r.status_code == 200:
+                with open(FONT_PATH_LATIN, 'wb') as f:
+                    f.write(r.content)
+        
+        if not os.path.exists(FONT_PATH_HINDI):
+            r = requests.get(FONT_URL_HINDI)
+            if r.status_code == 200:
+                with open(FONT_PATH_HINDI, 'wb') as f:
+                    f.write(r.content)
+    except Exception as e:
+        print(f"Error downloading fonts: {e}")
 
 # --- Google Drive Helpers ---
 @st.cache_resource
@@ -176,80 +200,39 @@ Instructions/Requirements: {instructions}
 
 # --- PDF Generation ---
 def create_pdf(text):
-    """Generate a PDF document from the generated markdown text using WeasyPrint."""
-    import weasyprint
+    """Generate a PDF document from the generated markdown text using fpdf2 HTML."""
+    html_content = markdown.markdown(text, extensions=['tables'])
     
-    # Convert Markdown to HTML
-    html_content = markdown.markdown(text, extensions=['tables', 'fenced_code'])
+    pdf = FPDF()
+    pdf.add_page()
     
-    # Wrap in basic professional HTML template
-    full_html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;700&family=Noto+Sans+Devanagari:wght@400;700&display=swap');
-            
-            @page {{
-                size: A4;
-                margin: 2.5cm;
-            }}
-            body {{
-                font-family: 'Noto Sans', 'Noto Sans Devanagari', sans-serif;
-                font-size: 12pt;
-                line-height: 1.6;
-                color: #333;
-            }}
-            h1, h2, h3 {{
-                color: #2c3e50;
-                margin-top: 1.5em;
-                margin-bottom: 0.5em;
-            }}
-            h1 {{
-                font-size: 24pt;
-                text-align: center;
-                border-bottom: 2px solid #2c3e50;
-                padding-bottom: 10px;
-            }}
-            h2 {{ font-size: 18pt; }}
-            h3 {{ font-size: 14pt; }}
-            p {{ margin-bottom: 1em; }}
-            ul, ol {{ margin-bottom: 1em; padding-left: 2em; }}
-            li {{ margin-bottom: 0.5em; }}
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-                margin-bottom: 1em;
-            }}
-            th, td {{
-                border: 1px solid #ddd;
-                padding: 8px;
-                text-align: left;
-            }}
-            th {{ background-color: #f2f2f2; }}
-        </style>
-    </head>
-    <body>
-        {html_content}
-    </body>
-    </html>
-    """
+    # Download font if not present
+    download_font()
     
-    # Generate PDF bytes using pdfkit
-    import pdfkit
-    options = {
-        'page-size': 'A4',
-        'margin-top': '20mm',
-        'margin-right': '20mm',
-        'margin-bottom': '20mm',
-        'margin-left': '20mm',
-        'encoding': "UTF-8",
-        'no-outline': None,
-        'enable-local-file-access': ""
-    }
-    pdf_bytes = pdfkit.from_string(full_html, False, options=options)
-    return pdf_bytes
+    if os.path.exists(FONT_PATH_LATIN) and os.path.exists(FONT_PATH_HINDI):
+        pdf.add_font("NotoSans", style="", fname=FONT_PATH_LATIN)
+        pdf.add_font("NotoSans", style="B", fname=FONT_PATH_LATIN)
+        pdf.add_font("NotoSans", style="I", fname=FONT_PATH_LATIN)
+        
+        pdf.add_font("NotoSansDevanagari", style="", fname=FONT_PATH_HINDI)
+        pdf.add_font("NotoSansDevanagari", style="B", fname=FONT_PATH_HINDI)
+        pdf.add_font("NotoSansDevanagari", style="I", fname=FONT_PATH_HINDI)
+        
+        pdf.set_font("NotoSans", size=12)
+        pdf.set_fallback_fonts(["NotoSansDevanagari"])
+        
+        try:
+            import uharfbuzz
+            pdf.set_text_shaping(True)
+        except ImportError:
+            pass
+    else:
+        pdf.set_font("Helvetica", size=12)
+        
+    # Write HTML directly to the PDF
+    pdf.write_html(html_content)
+    
+    return bytes(pdf.output())
 
 # --- Main App UI ---
 def main():
