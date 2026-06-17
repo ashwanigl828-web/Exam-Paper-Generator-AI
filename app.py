@@ -204,8 +204,15 @@ def create_pdf(text):
         
     for line in text.split('\n'):
         # Multi_cell helps with line wrapping
-        # Encode/decode handles some weird unicode edge cases silently
-        pdf.multi_cell(w=0, h=8, text=line)
+        # Catch errors if a line has unbreakable sequences wider than the page
+        try:
+            pdf.multi_cell(w=0, h=8, text=line, wrapmode="CHAR")
+        except Exception:
+            try:
+                # Fallback without wrapmode or truncate
+                pdf.multi_cell(w=0, h=8, text=line[:100] + "...")
+            except:
+                pass
         
     return bytearray(pdf.output())
 
