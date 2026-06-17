@@ -36,10 +36,10 @@ else:
     client = None
 
 FONT_URL_LATIN = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Regular.ttf"
-FONT_PATH_LATIN = "NotoSans-Regular.ttf"
+FONT_PATH_LATIN = os.path.join(tempfile.gettempdir(), "NotoSans-Regular.ttf")
 
 FONT_URL_HINDI = "https://github.com/google/fonts/raw/main/ofl/notosansdevanagari/NotoSansDevanagari-Regular.ttf"
-FONT_PATH_HINDI = "NotoSansDevanagari-Regular.ttf"
+FONT_PATH_HINDI = os.path.join(tempfile.gettempdir(), "NotoSansDevanagari-Regular.ttf")
 
 def download_font():
     """Download the fonts if they don't exist locally."""
@@ -50,6 +50,8 @@ def download_font():
                 if r.status_code == 200:
                     with open(FONT_PATH_LATIN, 'wb') as f:
                         f.write(r.content)
+                else:
+                    st.error(f"Failed to download Latin font: {r.status_code}")
         
         if not os.path.exists(FONT_PATH_HINDI):
             with st.spinner("Downloading Hindi font for PDF..."):
@@ -57,6 +59,8 @@ def download_font():
                 if r.status_code == 200:
                     with open(FONT_PATH_HINDI, 'wb') as f:
                         f.write(r.content)
+                else:
+                    st.error(f"Failed to download Hindi font: {r.status_code}")
     except Exception as e:
         st.error(f"Error downloading fonts: {e}")
 
@@ -228,7 +232,13 @@ def create_pdf(text):
         try:
             pdf.multi_cell(w=0, h=8, text=line)
         except Exception:
-            pass
+            # If the font does not support a character (like an emoji or bullet),
+            # fall back to a safe ascii representation so the line is not lost.
+            try:
+                safe_line = line.encode('ascii', 'ignore').decode('ascii')
+                pdf.multi_cell(w=0, h=8, text=safe_line)
+            except Exception:
+                pass
         
     return bytes(pdf.output())
 
