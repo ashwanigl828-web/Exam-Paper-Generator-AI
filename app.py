@@ -231,19 +231,19 @@ def create_pdf(text):
         # Strip some known problematic characters like emojis upfront just in case
         line = re.sub(r'[^\x00-\x7F\u0900-\u097F\u0080-\u00FF\u2000-\u206F]', '', line)
         
-        # Multi_cell helps with line wrapping
+        # write helps with line wrapping and is more robust with Hindi fonts in fpdf2
         try:
-            pdf.multi_cell(w=0, h=8, text=line)
+            pdf.write(h=8, txt=line + '\n')
         except Exception as e:
             # If the font does not support a character, strip down to highly safe chars
             try:
                 safe_line = re.sub(r'[^\x00-\x7F\u0900-\u097F]', '', line)
-                pdf.multi_cell(w=0, h=8, text=safe_line)
+                pdf.write(h=8, txt=safe_line + '\n')
             except Exception:
                 # Absolute fallback
                 try:
                     very_safe_line = line.encode('ascii', 'ignore').decode('ascii')
-                    pdf.multi_cell(w=0, h=8, text=very_safe_line)
+                    pdf.write(h=8, txt=very_safe_line + '\n')
                 except Exception:
                     pass
         
