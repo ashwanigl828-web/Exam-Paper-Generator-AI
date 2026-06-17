@@ -4,6 +4,7 @@ import tempfile
 import time
 import requests
 import io
+import markdown
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -179,32 +180,6 @@ def main():
     if "paper_text" not in st.session_state:
         st.session_state.paper_text = None
         
-    # Inject CSS for printing
-    st.markdown("""
-    <style>
-    @media print {
-        /* Hide everything except the main block container */
-        [data-testid="stSidebar"] { display: none !important; }
-        header { display: none !important; }
-        [data-testid="stToolbar"] { display: none !important; }
-        
-        /* Make the main block full width */
-        .main .block-container {
-            padding-top: 0 !important;
-            max-width: 100% !important;
-        }
-        
-        /* Ensure markdown elements print well */
-        .stMarkdown, .stMarkdown p, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown li {
-            color: black !important;
-        }
-        
-        /* Hide buttons from print */
-        button, .stButton, [data-testid="stFileUploader"] { display: none !important; }
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
     st.title("📄 AI-Powered Exam Paper Generator")
     
     # Run setup tasks
@@ -301,19 +276,66 @@ def main():
             st.subheader("Generated Paper Preview")
         with col2:
             import streamlit.components.v1 as components
-            # HTML button that triggers browser print functionality without reloading Streamlit
+            import json
+            
+            # Convert markdown to HTML for printing
+            html_paper = markdown.markdown(st.session_state.paper_text, extensions=['tables'])
+            
+            # Safely pass HTML to JavaScript using JSON serialization
+            js_html_str = json.dumps(html_paper)
+            
+            # HTML button that creates a hidden iframe and prints ONLY the paper HTML
             components.html(
-                """
-                <script>
-                function printApp() {
-                    window.parent.print();
-                }
-                </script>
+                f"""
                 <div style="text-align: right;">
-                    <button onclick="printApp()" style="padding: 10px 15px; font-size: 14px; font-weight: bold; background-color: #ff4b4b; color: white; border: none; border-radius: 5px; cursor: pointer; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">
+                    <button onclick="printPaper()" style="padding: 10px 15px; font-size: 14px; font-weight: bold; background-color: #ff4b4b; color: white; border: none; border-radius: 5px; cursor: pointer; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">
                         🖨️ Print to PDF
                     </button>
                 </div>
+                <script>
+                function printPaper() {{
+                    var htmlContent = {js_html_str};
+                    
+                    var printIframe = document.createElement('iframe');
+                    printIframe.style.position = 'absolute';
+                    printIframe.style.width = '0px';
+                    printIframe.style.height = '0px';
+                    printIframe.style.border = 'none';
+                    document.body.appendChild(printIframe);
+                    
+                    var doc = printIframe.contentWindow.document;
+                    doc.open();
+                    doc.write(`
+                        <html>
+                        <head>
+                            <title>Exam Paper</title>
+                            <style>
+                                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 40px; color: black; line-height: 1.6; max-width: 1000px; margin: auto; }}
+                                table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
+                                th, td {{ border: 1px solid #000; padding: 8px; text-align: left; }}
+                                h1, h2, h3, h4, h5, h6 {{ margin-top: 20px; margin-bottom: 10px; color: black; }}
+                                p, li {{ margin-bottom: 10px; color: black; }}
+                                @media print {{
+                                    body {{ padding: 0; }}
+                                }}
+                            </style>
+                        </head>
+                        <body>
+                            ${{htmlContent}}
+                        </body>
+                        </html>
+                    `);
+                    doc.close();
+                    
+                    setTimeout(function() {{
+                        printIframe.contentWindow.focus();
+                        printIframe.contentWindow.print();
+                        setTimeout(function() {{
+                            document.body.removeChild(printIframe);
+                        }}, 1000);
+                    }}, 500);
+                }}
+                </script>
                 """,
                 height=50
             )
