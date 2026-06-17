@@ -78,7 +78,7 @@ def get_folders_in_drive(service, parent_id):
     """Fetch class folders from the main drive folder."""
     try:
         query = f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-        results = service.files().list(q=query, fields="files(id, name)").execute()
+        results = service.files().list(q=query, fields="files(id, name)").execute(num_retries=3)
         return results.get('files', [])
     except Exception as e:
         st.error(f"Error fetching folders: {e}")
@@ -88,7 +88,7 @@ def get_pdfs_in_folder(service, folder_id):
     """Fetch Subject PDFs from a class folder."""
     try:
         query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
-        results = service.files().list(q=query, fields="files(id, name)").execute()
+        results = service.files().list(q=query, fields="files(id, name)").execute(num_retries=3)
         return results.get('files', [])
     except Exception as e:
         st.error(f"Error fetching PDFs: {e}")
