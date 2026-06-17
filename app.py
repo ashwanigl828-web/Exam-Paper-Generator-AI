@@ -35,10 +35,10 @@ if GEMINI_API_KEY:
 else:
     client = None
 
-FONT_URL_LATIN = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Regular.ttf"
+FONT_URL_LATIN = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf"
 FONT_PATH_LATIN = os.path.join(tempfile.gettempdir(), "NotoSans-Regular.ttf")
 
-FONT_URL_HINDI = "https://github.com/google/fonts/raw/main/ofl/notosansdevanagari/NotoSansDevanagari-Regular.ttf"
+FONT_URL_HINDI = "https://github.com/google/fonts/raw/main/ofl/notosansdevanagari/NotoSansDevanagari%5Bwdth%2Cwght%5D.ttf"
 FONT_PATH_HINDI = os.path.join(tempfile.gettempdir(), "NotoSansDevanagari-Regular.ttf")
 
 def download_font():
