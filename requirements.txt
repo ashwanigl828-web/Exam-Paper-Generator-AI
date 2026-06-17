@@ -1,5 +1,5 @@
 streamlit
-google-generativeai>=0.8.6
+google-genai
 google-api-python-client
 fpdf2
 python-dotenv
