@@ -236,8 +236,19 @@ def create_pdf(text):
     </html>
     """
     
-    # Generate PDF bytes
-    pdf_bytes = weasyprint.HTML(string=full_html).write_pdf()
+    # Generate PDF bytes using pdfkit
+    import pdfkit
+    options = {
+        'page-size': 'A4',
+        'margin-top': '20mm',
+        'margin-right': '20mm',
+        'margin-bottom': '20mm',
+        'margin-left': '20mm',
+        'encoding': "UTF-8",
+        'no-outline': None,
+        'enable-local-file-access': ""
+    }
+    pdf_bytes = pdfkit.from_string(full_html, False, options=options)
     return pdf_bytes
 
 # --- Main App UI ---
