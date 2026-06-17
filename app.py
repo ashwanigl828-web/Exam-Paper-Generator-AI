@@ -4,17 +4,13 @@ import tempfile
 import time
 import requests
 import io
-import json
-import markdown
-import tempfile
-import os
 from dotenv import load_dotenv
-from fpdf import FPDF
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google import genai
 from google.genai import types
+
 load_dotenv()
 
 # --- Config & Setup ---
@@ -37,29 +33,6 @@ if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 else:
     client = None
-
-FONT_URL_LATIN = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf"
-FONT_PATH_LATIN = os.path.join(tempfile.gettempdir(), "NotoSans-Regular.ttf")
-
-FONT_URL_HINDI = "https://github.com/google/fonts/raw/main/ofl/notosansdevanagari/NotoSansDevanagari%5Bwdth%2Cwght%5D.ttf"
-FONT_PATH_HINDI = os.path.join(tempfile.gettempdir(), "NotoSansDevanagari-Regular.ttf")
-
-def download_font():
-    """Download the fonts if they don't exist locally."""
-    try:
-        if not os.path.exists(FONT_PATH_LATIN):
-            r = requests.get(FONT_URL_LATIN)
-            if r.status_code == 200:
-                with open(FONT_PATH_LATIN, 'wb') as f:
-                    f.write(r.content)
-        
-        if not os.path.exists(FONT_PATH_HINDI):
-            r = requests.get(FONT_URL_HINDI)
-            if r.status_code == 200:
-                with open(FONT_PATH_HINDI, 'wb') as f:
-                    f.write(r.content)
-    except Exception as e:
-        print(f"Error downloading fonts: {e}")
 
 # --- Google Drive Helpers ---
 @st.cache_resource
@@ -198,45 +171,40 @@ Instructions/Requirements: {instructions}
             except:
                 pass
 
-# --- PDF Generation ---
-def create_pdf(text):
-    """Generate a PDF document from the generated markdown text using fpdf2 HTML."""
-    html_content = markdown.markdown(text, extensions=['tables'])
-    
-    pdf = FPDF()
-    pdf.add_page()
-    
-    # Download font if not present
-    download_font()
-    
-    if os.path.exists(FONT_PATH_LATIN) and os.path.exists(FONT_PATH_HINDI):
-        pdf.add_font("NotoSans", style="", fname=FONT_PATH_LATIN)
-        pdf.add_font("NotoSans", style="B", fname=FONT_PATH_LATIN)
-        pdf.add_font("NotoSans", style="I", fname=FONT_PATH_LATIN)
-        
-        pdf.add_font("NotoSansDevanagari", style="", fname=FONT_PATH_HINDI)
-        pdf.add_font("NotoSansDevanagari", style="B", fname=FONT_PATH_HINDI)
-        pdf.add_font("NotoSansDevanagari", style="I", fname=FONT_PATH_HINDI)
-        
-        pdf.set_font("NotoSans", size=12)
-        pdf.set_fallback_fonts(["NotoSansDevanagari"])
-        
-        try:
-            import uharfbuzz
-            pdf.set_text_shaping(True)
-        except ImportError:
-            pass
-    else:
-        pdf.set_font("Helvetica", size=12)
-        
-    # Write HTML directly to the PDF
-    pdf.write_html(html_content)
-    
-    return bytes(pdf.output())
-
 # --- Main App UI ---
 def main():
     st.set_page_config(page_title="AI-Powered Exam Paper Generator", layout="wide")
+    
+    # Initialize session state for retaining paper
+    if "paper_text" not in st.session_state:
+        st.session_state.paper_text = None
+        
+    # Inject CSS for printing
+    st.markdown("""
+    <style>
+    @media print {
+        /* Hide everything except the main block container */
+        [data-testid="stSidebar"] { display: none !important; }
+        header { display: none !important; }
+        [data-testid="stToolbar"] { display: none !important; }
+        
+        /* Make the main block full width */
+        .main .block-container {
+            padding-top: 0 !important;
+            max-width: 100% !important;
+        }
+        
+        /* Ensure markdown elements print well */
+        .stMarkdown, .stMarkdown p, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown li {
+            color: black !important;
+        }
+        
+        /* Hide buttons from print */
+        button, .stButton, [data-testid="stFileUploader"] { display: none !important; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
     st.title("📄 AI-Powered Exam Paper Generator")
     
     # Run setup tasks
@@ -322,20 +290,35 @@ def main():
             os.remove(blueprint_path)
             
         if paper_text:
+            st.session_state.paper_text = paper_text
+
+    # Show paper if it exists in session state
+    if st.session_state.paper_text:
+        st.markdown("---")
+        
+        col1, col2 = st.columns([0.8, 0.2])
+        with col1:
             st.subheader("Generated Paper Preview")
-            st.markdown(paper_text)
-            
-            with st.spinner("Creating PDF Download..."):
-                try:
-                    pdf_bytes = create_pdf(paper_text)
-                    st.download_button(
-                        label="Download Exam Paper as PDF",
-                        data=pdf_bytes,
-                        file_name="generated_exam_paper.pdf",
-                        mime="application/pdf"
-                    )
-                except Exception as e:
-                    st.error(f"Error creating PDF: {e}")
+        with col2:
+            import streamlit.components.v1 as components
+            # HTML button that triggers browser print functionality without reloading Streamlit
+            components.html(
+                """
+                <script>
+                function printApp() {
+                    window.parent.print();
+                }
+                </script>
+                <div style="text-align: right;">
+                    <button onclick="printApp()" style="padding: 10px 15px; font-size: 14px; font-weight: bold; background-color: #ff4b4b; color: white; border: none; border-radius: 5px; cursor: pointer; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">
+                        🖨️ Print to PDF
+                    </button>
+                </div>
+                """,
+                height=50
+            )
+
+        st.markdown(st.session_state.paper_text)
 
 if __name__ == "__main__":
     main()

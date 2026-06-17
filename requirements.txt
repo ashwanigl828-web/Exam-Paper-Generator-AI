@@ -3,6 +3,3 @@ google-genai
 google-api-python-client
 python-dotenv
 requests
-fpdf2
-uharfbuzz
-markdown
