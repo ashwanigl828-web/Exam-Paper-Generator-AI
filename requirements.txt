@@ -1,0 +1,6 @@
+streamlit
+google-generativeai
+google-api-python-client
+fpdf2
+python-dotenv
+requests
