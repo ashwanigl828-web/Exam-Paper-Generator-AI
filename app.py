@@ -97,19 +97,29 @@ def get_pdfs_in_folder(service, folder_id):
         return []
 
 def download_pdf_from_drive(service, file_id, file_name):
-    """Download a PDF from Drive to a local temporary file."""
-    request = service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while done is False:
-        status, done = downloader.next_chunk()
-    fh.seek(0)
-    
+    """Download a PDF from Drive to a local temporary file with retries."""
     temp_dir = tempfile.gettempdir()
     temp_path = os.path.join(temp_dir, file_name)
-    with open(temp_path, 'wb') as f:
-        f.write(fh.read())
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            request = service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            # Use 10MB chunk size to avoid SSL timeouts on large files
+            downloader = MediaIoBaseDownload(fh, request, chunksize=1024*1024*10)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+            fh.seek(0)
+            
+            with open(temp_path, 'wb') as f:
+                f.write(fh.read())
+            return temp_path
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise Exception(f"Failed to download from Drive after {max_retries} attempts: {e}")
+            time.sleep(2)
     return temp_path
 
 # --- Gemini Generation ---
@@ -159,7 +169,7 @@ Instructions/Requirements: {instructions}
         
         with st.spinner("Generating exam paper..."):
             response = client.models.generate_content(
-                model='gemini-1.5-flash',
+                model='gemini-2.5-flash',
                 contents=contents
             )
             
