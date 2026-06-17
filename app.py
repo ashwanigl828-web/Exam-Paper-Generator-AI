@@ -35,22 +35,30 @@ if GEMINI_API_KEY:
 else:
     client = None
 
-FONT_URL = "https://github.com/google/fonts/raw/main/ofl/lohitdevanagari/Lohit-Devanagari.ttf"
-FONT_PATH = "Lohit-Devanagari.ttf"
+FONT_URL_LATIN = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Regular.ttf"
+FONT_PATH_LATIN = "NotoSans-Regular.ttf"
+
+FONT_URL_HINDI = "https://github.com/google/fonts/raw/main/ofl/notosansdevanagari/NotoSansDevanagari-Regular.ttf"
+FONT_PATH_HINDI = "NotoSansDevanagari-Regular.ttf"
 
 def download_font():
-    """Download the Hindi font if it doesn't exist locally."""
-    if not os.path.exists(FONT_PATH):
-        try:
-            with st.spinner("Downloading Hindi font for PDF support..."):
-                r = requests.get(FONT_URL)
+    """Download the fonts if they don't exist locally."""
+    try:
+        if not os.path.exists(FONT_PATH_LATIN):
+            with st.spinner("Downloading Latin font for PDF..."):
+                r = requests.get(FONT_URL_LATIN)
                 if r.status_code == 200:
-                    with open(FONT_PATH, 'wb') as f:
+                    with open(FONT_PATH_LATIN, 'wb') as f:
                         f.write(r.content)
-                else:
-                    st.error(f"Failed to download font: Status {r.status_code}")
-        except Exception as e:
-            st.error(f"Error downloading font: {e}")
+        
+        if not os.path.exists(FONT_PATH_HINDI):
+            with st.spinner("Downloading Hindi font for PDF..."):
+                r = requests.get(FONT_URL_HINDI)
+                if r.status_code == 200:
+                    with open(FONT_PATH_HINDI, 'wb') as f:
+                        f.write(r.content)
+    except Exception as e:
+        st.error(f"Error downloading fonts: {e}")
 
 # --- Google Drive Helpers ---
 @st.cache_resource
@@ -195,9 +203,18 @@ def create_pdf(text):
     pdf = FPDF()
     pdf.add_page()
     
-    if os.path.exists(FONT_PATH):
-        pdf.add_font("Lohit-Devanagari", style="", fname=FONT_PATH)
-        pdf.set_font("Lohit-Devanagari", size=12)
+    if os.path.exists(FONT_PATH_LATIN) and os.path.exists(FONT_PATH_HINDI):
+        pdf.add_font("NotoSans", style="", fname=FONT_PATH_LATIN)
+        pdf.add_font("NotoSansDevanagari", style="", fname=FONT_PATH_HINDI)
+        pdf.set_font("NotoSans", size=12)
+        pdf.set_fallback_fonts(["NotoSansDevanagari"])
+        
+        # Enable text shaping if uharfbuzz is installed (for correct Hindi matras)
+        try:
+            import uharfbuzz
+            pdf.set_text_shaping(True)
+        except ImportError:
+            pass
     else:
         # Fallback to default
         pdf.set_font("Helvetica", size=12)
