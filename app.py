@@ -228,17 +228,24 @@ def create_pdf(text):
         # Sanitize: replace long sequences of dashes, equals, or underscores (markdown artifacts)
         line = re.sub(r'[-_=]{10,}', '---', line)
         
+        # Strip some known problematic characters like emojis upfront just in case
+        line = re.sub(r'[^\x00-\x7F\u0900-\u097F\u0080-\u00FF\u2000-\u206F]', '', line)
+        
         # Multi_cell helps with line wrapping
         try:
             pdf.multi_cell(w=0, h=8, text=line)
-        except Exception:
-            # If the font does not support a character (like an emoji or bullet),
-            # fall back to a safe ascii representation so the line is not lost.
+        except Exception as e:
+            # If the font does not support a character, strip down to highly safe chars
             try:
-                safe_line = line.encode('ascii', 'ignore').decode('ascii')
+                safe_line = re.sub(r'[^\x00-\x7F\u0900-\u097F]', '', line)
                 pdf.multi_cell(w=0, h=8, text=safe_line)
             except Exception:
-                pass
+                # Absolute fallback
+                try:
+                    very_safe_line = line.encode('ascii', 'ignore').decode('ascii')
+                    pdf.multi_cell(w=0, h=8, text=very_safe_line)
+                except Exception:
+                    pass
         
     return bytes(pdf.output())
 
