@@ -10,8 +10,8 @@ from fpdf import FPDF
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-import google.generativeai as genai
-
+from google import genai
+from google.genai import types
 load_dotenv()
 
 # --- Config & Setup ---
@@ -31,7 +31,9 @@ DRIVE_FOLDER_ID = get_config("DRIVE_FOLDER_ID")
 CREDENTIALS_FILE = "credentials.json"
 
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
+else:
+    client = None
 
 FONT_URL = "https://github.com/google/fonts/raw/main/ofl/lohitdevanagari/Lohit-Devanagari.ttf"
 FONT_PATH = "Lohit-Devanagari.ttf"
@@ -113,23 +115,33 @@ def download_pdf_from_drive(service, file_id, file_name):
 # --- Gemini Generation ---
 def generate_paper(instructions, language, book_path, blueprint_path=None):
     """Upload files to Gemini and generate the exam paper."""
+    if not client:
+        st.error("Gemini API Client is not initialized. Please check your API key.")
+        return None
+        
     uploaded_files = []
     try:
         with st.spinner("Uploading book to Gemini (this may take a moment)..."):
-            gemini_book = genai.upload_file(book_path, mime_type="application/pdf")
+            gemini_book = client.files.upload(
+                file=book_path, 
+                config=types.UploadFileConfig(mime_type="application/pdf")
+            )
             uploaded_files.append(gemini_book)
             
-            while gemini_book.state.name == "PROCESSING":
+            while gemini_book.state == "PROCESSING":
                 time.sleep(2)
-                gemini_book = genai.get_file(gemini_book.name)
+                gemini_book = client.files.get(name=gemini_book.name)
                 
         if blueprint_path:
             with st.spinner("Uploading blueprint to Gemini..."):
-                gemini_blueprint = genai.upload_file(blueprint_path, mime_type="application/pdf")
+                gemini_blueprint = client.files.upload(
+                    file=blueprint_path, 
+                    config=types.UploadFileConfig(mime_type="application/pdf")
+                )
                 uploaded_files.append(gemini_blueprint)
-                while gemini_blueprint.state.name == "PROCESSING":
+                while gemini_blueprint.state == "PROCESSING":
                     time.sleep(2)
-                    gemini_blueprint = genai.get_file(gemini_blueprint.name)
+                    gemini_blueprint = client.files.get(name=gemini_blueprint.name)
                     
         prompt = f"""
 You are an expert exam paper generator. 
@@ -145,9 +157,11 @@ Instructions/Requirements: {instructions}
         contents = [f for f in uploaded_files]
         contents.append(prompt)
         
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
         with st.spinner("Generating exam paper..."):
-            response = model.generate_content(contents)
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=contents
+            )
             
         return response.text
         
@@ -161,7 +175,7 @@ Instructions/Requirements: {instructions}
         # Cleanup uploaded files from Gemini to save storage
         for f in uploaded_files:
             try:
-                genai.delete_file(f.name)
+                client.files.delete(name=f.name)
             except:
                 pass
 
