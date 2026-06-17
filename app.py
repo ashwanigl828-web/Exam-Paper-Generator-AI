@@ -145,7 +145,7 @@ Instructions/Requirements: {instructions}
         contents = [f for f in uploaded_files]
         contents.append(prompt)
         
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
         with st.spinner("Generating exam paper..."):
             response = model.generate_content(contents)
             
