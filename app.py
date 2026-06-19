@@ -52,7 +52,14 @@ def get_config(key):
         return None
 
 def get_drive_folder_id():
-    return get_config("DRIVE_FOLDER_ID")
+    val = get_config("DRIVE_FOLDER_ID")
+    if val:
+        if "folders/" in val:
+            return val.split("folders/")[-1].split("?")[0].strip()
+        elif "id=" in val:
+            return val.split("id=")[-1].split("&")[0].strip()
+        return val.strip()
+    return None
 
 def get_gemini_keys():
     keys_str = get_config("GEMINI_KEYS")
