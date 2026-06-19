@@ -157,17 +157,38 @@ def process_with_gemini(task_mode, instructions, language, book_path, blueprint_
                     file=path, 
                     config=types.UploadFileConfig(mime_type=mime_type)
                 )
-                while gemini_file.state == "PROCESSING":
+                # Wait while the file is processing. Safely handle enum or string states.
+                while str(gemini_file.state).upper() == "PROCESSING" or getattr(gemini_file.state, "name", "") == "PROCESSING":
                     time.sleep(2)
                     gemini_file = client.files.get(name=gemini_file.name)
                 return gemini_file
 
-            def _generate_content(model, contents):
-                response = client.models.generate_content(
-                    model=model,
-                    contents=contents
-                )
-                return response.text
+            def _generate_content(contents):
+                models_to_try = [
+                    'gemini-2.5-flash',
+                    'gemini-2.0-flash',
+                    'gemini-1.5-flash',
+                    'gemini-1.5-flash-002',
+                    'models/gemini-1.5-flash',
+                    'gemini-1.5-pro'
+                ]
+                last_err = None
+                for model_name in models_to_try:
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=contents
+                        )
+                        return response.text
+                    except Exception as e:
+                        last_err = e
+                        error_str = str(e).lower()
+                        # If model is not found or not supported, try the next fallback model
+                        if "404" in error_str or "not found" in error_str or "not supported" in error_str:
+                            continue
+                        # For other API errors, raise to outer retry block
+                        raise e
+                raise last_err
 
             with st.spinner(f"Uploading document to Gemini (Attempt {attempt+1}/{len(keys)})..."):
                 gemini_book = execute_with_retry(_upload_file, book_path)
@@ -211,7 +232,7 @@ Provide a clear, direct answer based ONLY on the provided document context. If t
             contents.append(prompt)
             
             with st.spinner(f"Processing '{task_mode}' with Gemini..."):
-                result_text = execute_with_retry(_generate_content, 'gemini-1.5-flash', contents)
+                result_text = execute_with_retry(_generate_content, contents)
                 
             # If successful, cleanup and return immediately
             for c, f in uploaded_files:
