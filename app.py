@@ -210,7 +210,7 @@ Context:
         try:
             client = Groq(api_key=groq_key)
             completion = client.chat.completions.create(
-                model="llama3-70b-8192",
+                model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=4000,
@@ -231,7 +231,7 @@ Context:
         try:
             client = genai.Client(api_key=key)
             response = client.models.generate_content(
-                model='gemini-1.5-flash',
+                model='gemini-2.0-flash',
                 contents=prompt,
                 config=types.GenerateContentConfig(temperature=0.7)
             )
