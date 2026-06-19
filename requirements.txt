@@ -13,3 +13,4 @@ google-auth
 langchain-text-splitters
 langchain-huggingface
 sentence-transformers
+torchvision
