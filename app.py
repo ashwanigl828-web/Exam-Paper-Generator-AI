@@ -7,6 +7,7 @@ import requests
 import io
 import json
 import markdown
+import random
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -28,17 +29,22 @@ def get_config(key):
     except (KeyError, FileNotFoundError):
         return None
 
-GEMINI_API_KEY = get_config("GEMINI_API_KEY")
 DRIVE_FOLDER_ID = get_config("DRIVE_FOLDER_ID")
 CREDENTIALS_FILE = "credentials.json"
 
-if GEMINI_API_KEY:
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-    except Exception:
-        client = None
-else:
-    client = None
+# --- Gemini API Key Rotation System ---
+def get_gemini_keys():
+    """Retrieve all configured Gemini API keys."""
+    keys_str = get_config("GEMINI_KEYS")
+    if keys_str:
+        return [k.strip() for k in keys_str.split(",") if k.strip()]
+    
+    # Fallback to legacy single key for backward compatibility
+    single_key = get_config("GEMINI_API_KEY")
+    if single_key:
+        return [k.strip() for k in single_key.split(",") if k.strip()]
+        
+    return []
 
 # --- Helper: Retry Logic ---
 def execute_with_retry(func, *args, **kwargs):
@@ -47,13 +53,12 @@ def execute_with_retry(func, *args, **kwargs):
         return func(*args, **kwargs)
     except Exception as e:
         error_str = str(e).lower()
-        # Checking for common transient errors
-        if any(keyword in error_str for keyword in ["429", "connection", "quota", "timeout", "unavailable", "internal", "error"]):
-            time.sleep(2)  # Wait 2 seconds before retry (exponential backoff approach)
+        if any(keyword in error_str for keyword in ["429", "connection", "quota", "timeout", "unavailable", "internal", "error", "precondition"]):
+            time.sleep(2)
             try:
                 return func(*args, **kwargs)
             except Exception as retry_e:
-                raise Exception(f"Operation failed after retry. Please check your connection or try again later.")
+                raise Exception(f"Operation failed after retry. ({retry_e})")
         else:
             raise Exception(f"An unexpected error occurred: {e}")
 
@@ -126,97 +131,133 @@ def download_pdf_from_drive(service, file_id, file_name):
 
 # --- Gemini Generation ---
 def process_with_gemini(task_mode, instructions, language, book_path, blueprint_path=None):
-    """Upload files to Gemini and generate content based on the task mode."""
-    if not client:
-        st.error("Gemini API Client is not initialized. Please check your API key.")
+    """Upload files to Gemini and generate content based on the task mode, with API Key Rotation."""
+    keys = get_gemini_keys()
+    if not keys:
+        st.error("No API keys configured. Please add GEMINI_KEYS to your .env file.")
         return None
         
+    random.shuffle(keys) # Start with a random key to distribute load
+    
+    last_error = None
     uploaded_files = []
     
-    def _upload_file(path, mime_type="application/pdf"):
-        gemini_file = client.files.upload(
-            file=path, 
-            config=types.UploadFileConfig(mime_type=mime_type)
-        )
-        while gemini_file.state == "PROCESSING":
-            time.sleep(2)
-            gemini_file = client.files.get(name=gemini_file.name)
-        return gemini_file
-
-    def _generate_content(model, contents):
-        response = client.models.generate_content(
-            model=model,
-            contents=contents
-        )
-        return response.text
-
-    try:
-        with st.spinner("Uploading document to Gemini (this may take a moment)..."):
-            gemini_book = execute_with_retry(_upload_file, book_path)
-            uploaded_files.append(gemini_book)
+    for attempt, key in enumerate(keys):
+        try:
+            # Instantiate client inside the loop to avoid grpc state corruption (malloc errors)
+            # and to rotate keys seamlessly.
+            client = genai.Client(api_key=key)
             
-        if blueprint_path and task_mode == "Generate Exam Paper":
-            with st.spinner("Uploading blueprint to Gemini..."):
-                gemini_blueprint = execute_with_retry(_upload_file, blueprint_path)
-                uploaded_files.append(gemini_blueprint)
+            def _upload_file(path, mime_type="application/pdf"):
+                gemini_file = client.files.upload(
+                    file=path, 
+                    config=types.UploadFileConfig(mime_type=mime_type)
+                )
+                while gemini_file.state == "PROCESSING":
+                    time.sleep(2)
+                    gemini_file = client.files.get(name=gemini_file.name)
+                return gemini_file
+
+            def _generate_content(model, contents):
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents
+                )
+                return response.text
+
+            with st.spinner(f"Uploading document to Gemini (Attempt {attempt+1}/{len(keys)})..."):
+                gemini_book = execute_with_retry(_upload_file, book_path)
+                uploaded_files.append((client, gemini_book))
                 
-        # Determine Prompt based on Task Mode
-        if task_mode == "Generate Exam Paper":
-            prompt = f"""
+            if blueprint_path and task_mode == "Generate Exam Paper":
+                with st.spinner("Uploading blueprint to Gemini..."):
+                    gemini_blueprint = execute_with_retry(_upload_file, blueprint_path)
+                    uploaded_files.append((client, gemini_blueprint))
+                    
+            # Determine Prompt based on Task Mode
+            if task_mode == "Generate Exam Paper":
+                prompt = f"""
 You are an expert exam paper generator. 
 Create an exam paper based primarily on the uploaded textbook.
 Language: {language}
 Instructions/Requirements: {instructions}
 """
-            if blueprint_path:
-                prompt += "\nA Board Blueprint has also been uploaded. Analyze the blueprint to determine marks distribution, difficulty levels, and structure, and apply this to the exam paper."
-            prompt += "\nFormat the output clearly, line-by-line, suitable for a professional black & white print. Provide ONLY the exam paper content without any conversational filler."
-            
-        elif task_mode == "Summarize Chapter":
-            prompt = f"""
+                if blueprint_path:
+                    prompt += "\nA Board Blueprint has also been uploaded. Analyze the blueprint to determine marks distribution, difficulty levels, and structure, and apply this to the exam paper."
+                prompt += "\nFormat the output clearly, line-by-line, suitable for a professional black & white print. Provide ONLY the exam paper content without any conversational filler."
+                
+            elif task_mode == "Summarize Chapter":
+                prompt = f"""
 You are an expert teacher and summarizer.
 Create a concise, easy-to-understand explanation or summary based on the uploaded document.
 Instructions/Requirements: {instructions}
 Format the output nicely with headings and bullet points where appropriate. Ensure it is very easy to read and understand.
 """
-        elif task_mode == "Ask a Question":
-            prompt = f"""
+            elif task_mode == "Ask a Question":
+                prompt = f"""
 You are a helpful teaching assistant.
 Search the uploaded document to find the exact answer to the user's question.
 Question/Instructions: {instructions}
 Provide a clear, direct answer based ONLY on the provided document context. If the answer is not in the document, say so politely.
 """
-        else:
-            prompt = instructions
+            else:
+                prompt = instructions
 
-        contents = [f for f in uploaded_files]
-        contents.append(prompt)
-        
-        with st.spinner(f"Processing '{task_mode}' with Gemini..."):
-            # Forced to use gemini-1.5-flash for performance optimization
-            result_text = execute_with_retry(_generate_content, 'gemini-1.5-flash', contents)
+            contents = [f_obj for c, f_obj in uploaded_files if c == client]
+            contents.append(prompt)
             
-        return result_text
-        
-    except Exception as e:
-        st.error(f"Friendly Warning: Failed to process your request with AI. {e}")
-        return None
-    finally:
-        # Cleanup uploaded files from Gemini to save storage (Efficient Memory Management)
-        for f in uploaded_files:
+            with st.spinner(f"Processing '{task_mode}' with Gemini..."):
+                result_text = execute_with_retry(_generate_content, 'gemini-1.5-flash', contents)
+                
+            # If successful, cleanup and return immediately
+            for c, f in uploaded_files:
+                try:
+                    c.files.delete(name=f.name)
+                except:
+                    pass
+                    
             try:
-                execute_with_retry(client.files.delete, name=f.name)
-            except:
+                if book_path and os.path.exists(book_path):
+                    os.remove(book_path)
+                if blueprint_path and os.path.exists(blueprint_path):
+                    os.remove(blueprint_path)
+            except Exception:
                 pass
-        
-        # Cleanup local temporary files immediately (Efficient Memory Management)
+                
+            return result_text
+            
+        except Exception as e:
+            last_error = e
+            st.toast(f"API Error with current key. Automatically switching to next available key...")
+            # Cleanup files for this failed client attempt before moving to next key
+            for c, f in uploaded_files:
+                if c == client:
+                    try:
+                        c.files.delete(name=f.name)
+                    except:
+                        pass
+            uploaded_files = [(c, f) for c, f in uploaded_files if c != client]
+            time.sleep(1) # Small pause before trying next key
+            continue
+            
+    # If all keys are exhausted
+    st.error(f"Friendly Warning: All API keys failed or were exhausted. Last error: {last_error}")
+    
+    # Final cleanup
+    for c, f in uploaded_files:
         try:
-            if book_path and os.path.exists(book_path):
-                os.remove(book_path)
-            if blueprint_path and os.path.exists(blueprint_path):
-                os.remove(blueprint_path)
-        except Exception:
+            c.files.delete(name=f.name)
+        except:
             pass
+    try:
+        if book_path and os.path.exists(book_path):
+            os.remove(book_path)
+        if blueprint_path and os.path.exists(blueprint_path):
+            os.remove(blueprint_path)
+    except Exception:
+        pass
+        
+    return None
 
 # --- Main App UI ---
 def main():
@@ -233,8 +274,8 @@ def main():
     service = get_drive_service()
     
     # Verify configurations
-    if not GEMINI_API_KEY:
-        st.error("GEMINI_API_KEY is missing in the .env file.")
+    if not get_gemini_keys():
+        st.error("No API keys configured. Please add GEMINI_KEYS to your .env file.")
         return
         
     if not service:
