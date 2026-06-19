@@ -1,6 +1,12 @@
 streamlit
-google-genai
-google-api-python-client
+langchain
+langchain-community
+faiss-cpu
+langchain-google-genai
+groq
+reportlab
+pypdf
 python-dotenv
-requests
 markdown
+google-api-python-client
+google-auth
