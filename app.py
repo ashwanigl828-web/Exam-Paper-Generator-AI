@@ -152,7 +152,7 @@ def load_or_create_faiss_index(file_id, pdf_path):
         raise ValueError("No Gemini keys found. Needed for embeddings.")
     
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",
+        model="models/text-embedding-004",
         google_api_key=keys[0]
     )
     
