@@ -16,7 +16,7 @@ from googleapiclient.http import MediaIoBaseDownload
 # LangChain & FAISS
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
 # AI Engines
@@ -147,13 +147,9 @@ def load_or_create_faiss_index(file_id, pdf_path):
     """
     index_path = os.path.join(VECTOR_STORE_DIR, file_id)
     
-    keys = get_gemini_keys()
-    if not keys:
-        raise ValueError("No Gemini keys found. Needed for embeddings.")
-    
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004",
-        google_api_key=keys[0]
+    # Use local HuggingFace embeddings to avoid API errors and limits
+    embeddings = HuggingFaceEmbeddings(
+        model_name="all-MiniLM-L6-v2"
     )
     
     if os.path.exists(index_path) and os.path.exists(os.path.join(index_path, "index.faiss")):
