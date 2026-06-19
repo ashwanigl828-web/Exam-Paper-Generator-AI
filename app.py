@@ -16,13 +16,11 @@ from googleapiclient.http import MediaIoBaseDownload
 # LangChain & FAISS
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 
 # AI Engines
 from groq import Groq
-from google import genai
-from google.genai import types
 
 # ReportLab for PDF
 from reportlab.lib.pagesizes import letter
@@ -147,9 +145,14 @@ def load_or_create_faiss_index(file_id, pdf_path):
     """
     index_path = os.path.join(VECTOR_STORE_DIR, file_id)
     
-    # Use local HuggingFace embeddings to avoid API errors and limits
-    embeddings = HuggingFaceEmbeddings(
-        model_name="all-MiniLM-L6-v2"
+    # Use Gemini Embeddings to avoid memory corruption (PyTorch crashes on Streamlit Cloud)
+    gemini_keys = get_gemini_keys()
+    if not gemini_keys:
+        raise ValueError("GEMINI_API_KEY is required for embeddings.")
+    
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="models/embedding-001",
+        google_api_key=gemini_keys[0]
     )
     
     if os.path.exists(index_path) and os.path.exists(os.path.join(index_path, "index.faiss")):
@@ -229,13 +232,13 @@ Context:
     
     for key in gemini_keys:
         try:
-            client = genai.Client(api_key=key)
-            response = client.models.generate_content(
-                model='gemini-2.0-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.7)
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash", 
+                google_api_key=key, 
+                temperature=0.7
             )
-            return response.text
+            response = llm.invoke(prompt)
+            return response.content
         except Exception as e:
             last_error = e
             continue
