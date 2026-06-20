@@ -275,7 +275,7 @@ Context:
     for key in gemini_keys:
         try:
             llm = ChatGoogleGenerativeAI(
-                model="gemini-1.5-flash", 
+                model="gemini-3.5-flash", 
                 google_api_key=key, 
                 temperature=0.7
             )
