@@ -1,4 +1,10 @@
 import os
+
+# Fix gRPC and FAISS malloc crash issues in Streamlit Cloud
+os.environ['GRPC_POLL_STRATEGY'] = 'epoll1'
+os.environ['GRPC_ENABLE_FORK_SUPPORT'] = '0'
+os.environ['OMP_NUM_THREADS'] = '1'
+
 import time
 import tempfile
 import io
@@ -32,9 +38,7 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# Fix gRPC malloc crash issues in Streamlit Cloud
-os.environ['GRPC_POLL_STRATEGY'] = 'epoll1'
-os.environ['GRPC_ENABLE_FORK_SUPPORT'] = '0'
+# ReportLab for PDF
 
 load_dotenv()
 
