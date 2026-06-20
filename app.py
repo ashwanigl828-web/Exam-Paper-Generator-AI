@@ -46,6 +46,7 @@ load_dotenv()
 SCOPES = ['https://www.googleapis.com/auth/drive']
 CREDENTIALS_FILE = "credentials.json"
 VECTOR_STORE_DIR = "vector_store"
+EMBEDDING_MODEL = "models/text-embedding-004"  # ✓ Verified working model with Google Generative AI v1beta
 os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
 
 # Register Hindi Font if available
@@ -101,6 +102,19 @@ def execute_with_retry(func, *args, **kwargs):
                 raise Exception(f"Operation failed after retry. ({retry_e})")
         else:
             raise Exception(f"An unexpected error occurred: {e}")
+
+# --- Helper: Embedding Error Handler ---
+def handle_embedding_error(error):
+    """Handle embedding-related errors with helpful messages"""
+    error_str = str(error)
+    if "404" in error_str and "NOT_FOUND" in error_str:
+        return f"❌ Embedding Model Error: The model '{EMBEDDING_MODEL}' is not available. This might be because: 1) Old FAISS vector stores need to be regenerated 2) API key doesn't have access to embeddings 3) Please clear cache and try again. Error: {error}"
+    elif "PERMISSION_DENIED" in error_str or "permission" in error_str.lower():
+        return f"❌ API Permission Error: Your API key doesn't have permission to use embeddings. Please check your Google Cloud credentials."
+    elif "401" in error_str or "unauthorized" in error_str.lower():
+        return f"❌ API Authentication Error: Invalid or missing API key. Please check GEMINI_API_KEY configuration."
+    else:
+        return f"❌ Embedding Error: {error}"
 
 # --- Google Drive Helpers ---
 @st.cache_resource(show_spinner=False)
@@ -179,11 +193,14 @@ def create_and_save_faiss(pdf_path, save_dir):
     gemini_keys = get_gemini_keys()
     if not gemini_keys:
         raise ValueError("GEMINI_API_KEY is required for embeddings.")
-        
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004",
-        google_api_key=gemini_keys[0]
-    )
+    
+    try:
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model=EMBEDDING_MODEL,
+            google_api_key=gemini_keys[0]
+        )
+    except Exception as e:
+        raise Exception(handle_embedding_error(e))
     
     loader = PyPDFLoader(pdf_path)
     pages = loader.load()
@@ -191,7 +208,11 @@ def create_and_save_faiss(pdf_path, save_dir):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
     chunks = text_splitter.split_documents(pages)
     
-    db = FAISS.from_documents(chunks, embeddings)
+    try:
+        db = FAISS.from_documents(chunks, embeddings)
+    except Exception as e:
+        raise Exception(handle_embedding_error(e))
+    
     os.makedirs(save_dir, exist_ok=True)
     db.save_local(save_dir)
     return db
@@ -202,14 +223,21 @@ def load_faiss_from_zip(_zip_path, extract_dir):
         zip_ref.extractall(extract_dir)
         
     gemini_keys = get_gemini_keys()
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004",
-        google_api_key=gemini_keys[0]
-    )
+    try:
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model=EMBEDDING_MODEL,
+            google_api_key=gemini_keys[0]
+        )
+    except Exception as e:
+        raise Exception(handle_embedding_error(e))
     
     # allow_dangerous_deserialization=True is required to load FAISS indices, 
     # but since we generated them ourselves, it is safe.
-    db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
+    try:
+        db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
+    except Exception as e:
+        raise Exception(handle_embedding_error(e))
+    
     return db
 
 # --- Hybrid AI Engine ---
@@ -422,7 +450,11 @@ def main():
                         shutil.rmtree(faiss_dir)
                         
                 except Exception as e:
-                    st.error(f"An error occurred during upload: {e}")
+                    error_msg = str(e)
+                    if "embedding" in error_msg.lower() or "404" in error_msg or "NOT_FOUND" in error_msg:
+                        st.error(error_msg)
+                    else:
+                        st.error(f"An error occurred during upload: {e}")
 
     else:
         st.title("🎓 Smart School Learning Suite")
@@ -525,11 +557,14 @@ def main():
                     else:
                         with st.spinner("Loading local vector store..."):
                             gemini_keys = get_gemini_keys()
-                            embeddings = GoogleGenerativeAIEmbeddings(
-                                model="models/text-embedding-004",
-                                google_api_key=gemini_keys[0]
-                            )
-                            db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
+                            try:
+                                embeddings = GoogleGenerativeAIEmbeddings(
+                                    model=EMBEDDING_MODEL,
+                                    google_api_key=gemini_keys[0]
+                                )
+                                db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
+                            except Exception as e:
+                                raise Exception(handle_embedding_error(e))
                         
                     # 2. Retrieve Relevant Chunks
                     with st.spinner("Retrieving relevant context..."):
@@ -544,7 +579,11 @@ def main():
                             st.session_state.result_text = result
                             
                 except Exception as e:
-                    st.error(f"An error occurred: {e}")
+                    error_msg = str(e)
+                    if "embedding" in error_msg.lower() or "404" in error_msg or "NOT_FOUND" in error_msg:
+                        st.error(error_msg)
+                    else:
+                        st.error(f"An error occurred: {e}")
 
         # Show result
         if st.session_state.result_text:
