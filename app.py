@@ -49,6 +49,18 @@ VECTOR_STORE_DIR = "vector_store"
 EMBEDDING_MODEL = "models/text-embedding-004"  # ✓ Verified working model with Google Generative AI v1beta
 os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
 
+# Streamlit Cache Management
+@st.cache_resource
+def get_cache_key():
+    """Generate unique cache key to bust old caches"""
+    return "cache_v2_embedding_004_2026"
+
+# Clear old cache automatically if needed
+if "cache_busted" not in st.session_state:
+    st.session_state.cache_busted = False
+    # Force clear streamlit cache if it's a new session
+    st.cache_resource.clear()
+
 # Register Hindi Font if available
 try:
     font_path = "NotoSansDevanagari-Regular.ttf"
@@ -115,6 +127,50 @@ def handle_embedding_error(error):
         return f"❌ API Authentication Error: Invalid or missing API key. Please check GEMINI_API_KEY configuration."
     else:
         return f"❌ Embedding Error: {error}"
+
+# --- Model Validation ---
+@st.cache_resource(show_spinner=False)
+def validate_embedding_model(api_key):
+    """Validate that the embedding model works with the current API key and library versions"""
+    try:
+        test_embeddings = GoogleGenerativeAIEmbeddings(
+            model=EMBEDDING_MODEL,
+            google_api_key=api_key
+        )
+        # Test with a simple query
+        test_result = test_embeddings.embed_query("test")
+        if test_result and len(test_result) > 0:
+            return {
+                "valid": True,
+                "model": EMBEDDING_MODEL,
+                "embedding_dimension": len(test_result),
+                "message": f"✅ Embedding model validated: {EMBEDDING_MODEL} ({len(test_result)} dimensions)"
+            }
+    except Exception as e:
+        error_msg = str(e)
+        return {
+            "valid": False,
+            "model": EMBEDDING_MODEL,
+            "error": error_msg,
+            "message": f"❌ Embedding validation failed: {handle_embedding_error(e)}"
+        }
+
+# --- Clear Old Vector Stores ---
+def clear_old_vector_stores():
+    """Optionally clear old vector stores created with incompatible models"""
+    try:
+        vector_store_path = Path(VECTOR_STORE_DIR)
+        if vector_store_path.exists():
+            # Check for old stores (optional, don't force delete)
+            old_stores = list(vector_store_path.glob("*"))
+            return {
+                "found": len(old_stores),
+                "path": str(vector_store_path),
+                "action": "regenerate_on_upload"
+            }
+    except Exception as e:
+        pass
+    return {"found": 0, "action": "none"}
 
 # --- Google Drive Helpers ---
 @st.cache_resource(show_spinner=False)
@@ -361,9 +417,33 @@ def main():
     if "result_text" not in st.session_state:
         st.session_state.result_text = None
         
-    if not get_gemini_keys() and not get_groq_key():
+    # Check for API keys
+    gemini_keys = get_gemini_keys()
+    groq_key = get_groq_key()
+    
+    if not gemini_keys and not groq_key:
         st.error("No API keys configured. Please add GEMINI_KEYS and/or GROQ_API_KEY to your .env file or Streamlit Secrets.")
         return
+    
+    # Validate embedding model (CRITICAL - this prevents 404 errors)
+    if gemini_keys:
+        validation = validate_embedding_model(gemini_keys[0])
+        if not validation["valid"]:
+            st.error(validation["message"])
+            st.warning("⚠️ The embedding model is not working. This could be due to:")
+            st.warning("1. Old cached Streamlit data (clear browser cache)")
+            st.warning("2. API key doesn't have embeddings enabled")
+            st.warning("3. Incompatible library versions (try: pip install --upgrade google-generativeai langchain-google-genai)")
+            st.warning("4. Old vector stores created with incompatible model (regenerate by re-uploading PDFs)")
+            
+            # Show debug info
+            with st.expander("🔧 Debug Information"):
+                st.write(f"Model: {validation['model']}")
+                st.write(f"Error: {validation['error']}")
+            return
+        else:
+            # Store validation result in session for reference
+            st.session_state.embedding_valid = True
 
     drive_folder_id = get_drive_folder_id()
     if not drive_folder_id:
