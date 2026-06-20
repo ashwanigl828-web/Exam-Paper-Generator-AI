@@ -181,7 +181,7 @@ def create_and_save_faiss(pdf_path, save_dir):
         raise ValueError("GEMINI_API_KEY is required for embeddings.")
         
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",
+        model="models/text-embedding-004",
         google_api_key=gemini_keys[0]
     )
     
@@ -203,7 +203,7 @@ def load_faiss_from_zip(_zip_path, extract_dir):
         
     gemini_keys = get_gemini_keys()
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",
+        model="models/text-embedding-004",
         google_api_key=gemini_keys[0]
     )
     
@@ -526,7 +526,7 @@ def main():
                         with st.spinner("Loading local vector store..."):
                             gemini_keys = get_gemini_keys()
                             embeddings = GoogleGenerativeAIEmbeddings(
-                                model="models/embedding-001",
+                                model="models/text-embedding-004",
                                 google_api_key=gemini_keys[0]
                             )
                             db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
