@@ -3,6 +3,8 @@ import time
 import tempfile
 import io
 import random
+import zipfile
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -11,7 +13,7 @@ import streamlit as st
 # Google Drive API
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 # LangChain & FAISS
 from langchain_community.document_loaders import PyPDFLoader
@@ -27,6 +29,8 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 # Fix gRPC malloc crash issues in Streamlit Cloud
 os.environ['GRPC_POLL_STRATEGY'] = 'epoll1'
@@ -35,10 +39,18 @@ os.environ['GRPC_ENABLE_FORK_SUPPORT'] = '0'
 load_dotenv()
 
 # --- Config & Setup ---
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+SCOPES = ['https://www.googleapis.com/auth/drive']
 CREDENTIALS_FILE = "credentials.json"
 VECTOR_STORE_DIR = "vector_store"
 os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
+
+# Register Hindi Font if available
+try:
+    font_path = "NotoSansDevanagari-Regular.ttf"
+    if os.path.exists(font_path):
+        pdfmetrics.registerFont(TTFont('HindiFont', font_path))
+except Exception as e:
+    pass
 
 def get_config(key):
     val = os.getenv(key)
@@ -114,11 +126,33 @@ def get_folders_in_drive(service, parent_id):
     query = f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
     return execute_with_retry(_fetch_drive_files, service, query)
 
-def get_pdfs_in_folder(service, folder_id):
-    query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
+def get_zips_in_folder(service, folder_id):
+    query = f"'{folder_id}' in parents and mimeType='application/zip' and trashed=false"
     return execute_with_retry(_fetch_drive_files, service, query)
 
-def download_pdf_from_drive(service, file_id, file_name):
+def create_folder_in_drive(service, parent_id, folder_name):
+    file_metadata = {
+        'name': folder_name,
+        'mimeType': 'application/vnd.google-apps.folder',
+        'parents': [parent_id]
+    }
+    def _create():
+        return service.files().create(body=file_metadata, fields='id').execute()
+    folder = execute_with_retry(_create)
+    return folder.get('id')
+
+def upload_file_to_drive(service, parent_id, file_path, file_name, mime_type):
+    file_metadata = {
+        'name': file_name,
+        'parents': [parent_id]
+    }
+    media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
+    def _upload():
+        return service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+    file = execute_with_retry(_upload)
+    return file.get('id')
+
+def download_file_from_drive(service, file_id, file_name):
     temp_dir = tempfile.gettempdir()
     temp_path = os.path.join(temp_dir, file_name)
     
@@ -137,40 +171,42 @@ def download_pdf_from_drive(service, file_id, file_name):
     return execute_with_retry(_download)
 
 # --- RAG & Vector Store Logic ---
-@st.cache_resource(show_spinner=False)
-def load_or_create_faiss_index(file_id, pdf_path):
-    """
-    Checks if a FAISS index exists for the given Drive file ID.
-    If not, processes the local temp PDF, chunks it, creates embeddings, and saves to local FAISS.
-    """
-    index_path = os.path.join(VECTOR_STORE_DIR, file_id)
-    
-    # Use Gemini Embeddings to avoid memory corruption (PyTorch crashes on Streamlit Cloud)
+def create_and_save_faiss(pdf_path, save_dir):
     gemini_keys = get_gemini_keys()
     if not gemini_keys:
         raise ValueError("GEMINI_API_KEY is required for embeddings.")
-    
+        
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
         google_api_key=gemini_keys[0]
     )
     
-    if os.path.exists(index_path) and os.path.exists(os.path.join(index_path, "index.faiss")):
-        db = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
-        return db
-    else:
-        if not pdf_path or not os.path.exists(pdf_path):
-            raise FileNotFoundError("PDF file was not downloaded correctly.")
-            
-        loader = PyPDFLoader(pdf_path)
-        pages = loader.load()
+    loader = PyPDFLoader(pdf_path)
+    pages = loader.load()
+    
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+    chunks = text_splitter.split_documents(pages)
+    
+    db = FAISS.from_documents(chunks, embeddings)
+    os.makedirs(save_dir, exist_ok=True)
+    db.save_local(save_dir)
+    return db
+
+@st.cache_resource(show_spinner=False)
+def load_faiss_from_zip(_zip_path, extract_dir):
+    with zipfile.ZipFile(_zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
         
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
-        chunks = text_splitter.split_documents(pages)
-        
-        db = FAISS.from_documents(chunks, embeddings)
-        db.save_local(index_path)
-        return db
+    gemini_keys = get_gemini_keys()
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="models/text-embedding-004",
+        google_api_key=gemini_keys[0]
+    )
+    
+    # allow_dangerous_deserialization=True is required to load FAISS indices, 
+    # but since we generated them ourselves, it is safe.
+    db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
+    return db
 
 # --- Hybrid AI Engine ---
 def process_hybrid_ai(task_mode, instructions, language, context_text):
@@ -194,6 +230,7 @@ Context:
         prompt = f"""
 You are an expert teacher and summarizer.
 Create a concise, easy-to-understand explanation or summary based on the provided context.
+Language: {language}
 Instructions/Requirements: {instructions}
 
 Context:
@@ -203,6 +240,7 @@ Context:
         prompt = f"""
 You are a helpful teaching assistant.
 Answer the user's question based ONLY on the provided context.
+Language: {language}
 Question/Instructions: {instructions}
 
 Context:
@@ -251,9 +289,12 @@ def create_pdf_from_text(text, filename="output.pdf"):
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
     styles = getSampleStyleSheet()
     
-    title_style = ParagraphStyle('CustomTitle', parent=styles['Heading1'], alignment=TA_CENTER, fontSize=18, spaceAfter=14)
-    heading_style = ParagraphStyle('CustomHeading', parent=styles['Heading2'], fontSize=14, spaceAfter=10, spaceBefore=10)
-    body_style = ParagraphStyle('CustomBody', parent=styles['Normal'], fontSize=11, spaceAfter=8, leading=14)
+    # Use Hindi font if registered, else fallback to standard fonts
+    font_name = 'HindiFont' if 'HindiFont' in pdfmetrics.getRegisteredFontNames() else 'Helvetica'
+    
+    title_style = ParagraphStyle('CustomTitle', parent=styles['Heading1'], fontName=font_name, alignment=TA_CENTER, fontSize=18, spaceAfter=14)
+    heading_style = ParagraphStyle('CustomHeading', parent=styles['Heading2'], fontName=font_name, fontSize=14, spaceAfter=10, spaceBefore=10)
+    body_style = ParagraphStyle('CustomBody', parent=styles['Normal'], fontName=font_name, fontSize=11, spaceAfter=8, leading=14)
     
     story = []
     lines = text.split('\n')
@@ -288,9 +329,6 @@ def main():
     if "result_text" not in st.session_state:
         st.session_state.result_text = None
         
-    st.title("🎓 Smart School Learning Suite")
-    st.markdown("---")
-    
     if not get_gemini_keys() and not get_groq_key():
         st.error("No API keys configured. Please add GEMINI_KEYS and/or GROQ_API_KEY to your .env file or Streamlit Secrets.")
         return
@@ -305,133 +343,222 @@ def main():
         st.warning("Google Drive credentials not found or invalid. Please check your credentials.json and secrets.")
         return
 
-    # --- Sidebar ---
-    st.sidebar.header("1. Select Task Mode")
-    task_mode = st.sidebar.selectbox(
-        "Task Mode", 
-        ["Generate Exam Paper", "Summarize Chapter", "Ask a Question"]
-    )
-    
+    # --- Sidebar Navigation ---
+    st.sidebar.title("Navigation")
+    app_mode = st.sidebar.radio("Go to:", ["🎓 Learning Suite", "⚙️ Manage Books"])
     st.sidebar.markdown("---")
-    st.sidebar.header("2. Select Source Material")
-    
-    classes = get_folders_in_drive(service, drive_folder_id)
-    selected_subject_id = None
-    selected_subject_name = None
-    
-    if not classes:
-        st.sidebar.error("No Class folders found in the specified Drive folder.")
-    else:
-        class_names = [c['name'] for c in classes]
-        selected_class_name = st.sidebar.selectbox("Select Class", class_names)
-        selected_class_id = next(c['id'] for c in classes if c['name'] == selected_class_name)
-        
-        subjects = get_pdfs_in_folder(service, selected_class_id)
-        if not subjects:
-            st.sidebar.warning("No subject PDFs found in this class folder.")
-        else:
-            subject_names = [s['name'] for s in subjects]
-            selected_subject_name = st.sidebar.selectbox("Select Subject (Book PDF)", subject_names)
-            selected_subject_id = next(s['id'] for s in subjects if s['name'] == selected_subject_name)
-            
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        """
-        <div style="text-align: center; color: gray; font-size: 0.9em; padding-top: 20px;">
-            <p><b>© 2026 GGSSS Morak Station | Developed by Ashwani Goyal</b></p>
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
 
-    # --- Main Area ---
-    st.header("3. Configuration")
-    
-    language = "English"
-    if task_mode == "Generate Exam Paper":
-        col1, col2 = st.columns([1, 2])
+    if app_mode == "⚙️ Manage Books":
+        st.title("⚙️ Manage Books & Upload")
+        st.markdown("Upload a PDF book. The bot will automatically vectorize it and save the FAISS index to Google Drive so it loads instantly next time.")
+        
+        st.subheader("1. Class Details")
+        classes = get_folders_in_drive(service, drive_folder_id)
+        class_names = [c['name'] for c in classes] if classes else []
+        
+        col1, col2 = st.columns(2)
         with col1:
-            language = st.selectbox("Language", ["English", "Hindi", "Both (Bilingual)"])
+            class_action = st.radio("Class Action", ["Select Existing Class", "Create New Class"])
+        
         with col2:
-            instructions = st.text_area(
-                "Instructions", 
-                placeholder="e.g., Chapter 5, 50 marks, Hard difficulty, 5 MCQs, 3 Long Qs",
-                height=150
-            )
+            selected_class_id = None
+            if class_action == "Select Existing Class":
+                if not class_names:
+                    st.warning("No existing classes found.")
+                else:
+                    sel_class = st.selectbox("Select Class", class_names)
+                    selected_class_id = next(c['id'] for c in classes if c['name'] == sel_class)
+            else:
+                new_class_name = st.text_input("New Class Name (e.g., Class 10)")
+                
+        st.subheader("2. Book Details")
+        book_name = st.text_input("Book Name (e.g., Science, Mathematics Vol 1)")
+        uploaded_pdf = st.file_uploader("Upload PDF Book", type=["pdf"])
+        
+        if st.button("Process & Upload to Drive", type="primary"):
+            if class_action == "Create New Class" and new_class_name:
+                with st.spinner(f"Creating class folder '{new_class_name}' in Drive..."):
+                    selected_class_id = create_folder_in_drive(service, drive_folder_id, new_class_name)
+            
+            if not selected_class_id:
+                st.error("Please select or create a valid Class.")
+            elif not book_name.strip():
+                st.error("Please enter a valid Book Name.")
+            elif not uploaded_pdf:
+                st.error("Please upload a PDF file.")
+            else:
+                try:
+                    book_clean_name = book_name.strip().replace(" ", "_")
+                    temp_pdf_path = os.path.join(tempfile.gettempdir(), f"{book_clean_name}_{int(time.time())}.pdf")
+                    
+                    with open(temp_pdf_path, "wb") as f:
+                        f.write(uploaded_pdf.getbuffer())
+                    
+                    faiss_dir = os.path.join(VECTOR_STORE_DIR, book_clean_name)
+                    
+                    with st.spinner("Processing PDF: Chunking and creating FAISS Vector Text..."):
+                        create_and_save_faiss(temp_pdf_path, faiss_dir)
+                        
+                    with st.spinner("Zipping Vector Text..."):
+                        zip_base_path = os.path.join(tempfile.gettempdir(), f"{book_clean_name}_faiss")
+                        shutil.make_archive(zip_base_path, 'zip', faiss_dir)
+                        zip_file_path = f"{zip_base_path}.zip"
+                        
+                    with st.spinner("Uploading Vector Text (FAISS Zip) to Google Drive..."):
+                        upload_file_to_drive(service, selected_class_id, zip_file_path, f"{book_clean_name}_faiss.zip", "application/zip")
+                        
+                    st.success(f"Successfully processed '{book_name}' and uploaded its vector text to Drive!")
+                    
+                    # Cleanup local temp files
+                    if os.path.exists(temp_pdf_path):
+                        os.remove(temp_pdf_path)
+                    if os.path.exists(zip_file_path):
+                        os.remove(zip_file_path)
+                    if os.path.exists(faiss_dir):
+                        shutil.rmtree(faiss_dir)
+                        
+                except Exception as e:
+                    st.error(f"An error occurred during upload: {e}")
+
     else:
-        instructions = st.text_area(
-            f"Instructions / {'Prompt' if task_mode == 'Summarize Chapter' else 'Question'}", 
-            placeholder="Type your prompt or question here...",
-            height=150
+        st.title("🎓 Smart School Learning Suite")
+        st.markdown("---")
+        
+        # --- Sidebar ---
+        st.sidebar.header("1. Select Task Mode")
+        task_mode = st.sidebar.selectbox(
+            "Task Mode", 
+            ["Generate Exam Paper", "Summarize Chapter", "Ask a Question"]
         )
         
-    button_text = "Generate Paper" if task_mode == "Generate Exam Paper" else ("Summarize" if task_mode == "Summarize Chapter" else "Find Answer")
-    
-    if st.button(button_text, type="primary"):
-        if not selected_subject_id:
-            st.error("Please select a valid subject PDF from the sidebar.")
-        elif not instructions.strip():
-            st.error("Please provide instructions or a question.")
+        st.sidebar.markdown("---")
+        st.sidebar.header("2. Select Source Material")
+        
+        classes = get_folders_in_drive(service, drive_folder_id)
+        selected_subject_id = None
+        selected_subject_name = None
+        
+        if not classes:
+            st.sidebar.error("No Class folders found in the specified Drive folder.")
         else:
-            try:
-                # 1. Check if FAISS exists, otherwise download and process
-                index_path = os.path.join(VECTOR_STORE_DIR, selected_subject_id)
-                book_temp_path = None
+            class_names = [c['name'] for c in classes]
+            selected_class_name = st.sidebar.selectbox("Select Class", class_names)
+            selected_class_id = next(c['id'] for c in classes if c['name'] == selected_class_name)
+            
+            # Now fetch ZIP files instead of PDFs
+            subjects = get_zips_in_folder(service, selected_class_id)
+            if not subjects:
+                st.sidebar.warning("No processed books (Vector Zips) found in this class. Please upload using 'Manage Books'.")
+            else:
+                # Display name without _faiss.zip
+                subject_display_names = [s['name'].replace("_faiss.zip", "").replace(".zip", "").replace("_", " ") for s in subjects]
+                sel_subject_disp = st.sidebar.selectbox("Select Subject/Book", subject_display_names)
                 
-                # We only need to download if the index doesn't exist yet
-                if not (os.path.exists(index_path) and os.path.exists(os.path.join(index_path, "index.faiss"))):
-                    with st.spinner("Downloading PDF from Google Drive..."):
-                        book_temp_path = download_pdf_from_drive(service, selected_subject_id, selected_subject_name)
+                # Find the matching original zip file name
+                original_zip_name = next(s['name'] for s in subjects if s['name'].replace("_faiss.zip", "").replace(".zip", "").replace("_", " ") == sel_subject_disp)
+                selected_subject_id = next(s['id'] for s in subjects if s['name'] == original_zip_name)
+                selected_subject_name = original_zip_name
                 
-                with st.spinner("Preparing vector store (this runs once per book)..."):
-                    db = load_or_create_faiss_index(selected_subject_id, book_temp_path)
-                    
-                # Clean up temp file
-                if book_temp_path and os.path.exists(book_temp_path):
-                    os.remove(book_temp_path)
-                    
-                # 2. Retrieve Relevant Chunks
-                with st.spinner("Retrieving relevant context..."):
-                    k_val = 15 if task_mode != "Ask a Question" else 5
-                    docs = db.similarity_search(instructions, k=k_val)
-                    context_text = "\n\n".join([doc.page_content for doc in docs])
-                
-                # 3. Generate Output using Hybrid Engine
-                with st.spinner("Generating response with AI Engine..."):
-                    result = process_hybrid_ai(task_mode, instructions, language, context_text)
-                    if result:
-                        st.session_state.result_text = result
-                        
-            except Exception as e:
-                st.error(f"An error occurred: {e}")
+        st.sidebar.markdown("---")
+        st.sidebar.markdown(
+            """
+            <div style="text-align: center; color: gray; font-size: 0.9em; padding-top: 20px;">
+                <p><b>© 2026 GGSSS Morak Station | Developed by Ashwani Goyal</b></p>
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
 
-    # Show result
-    if st.session_state.result_text:
-        st.markdown("---")
-        st.subheader(f"{task_mode} Result")
+        # --- Main Area ---
+        st.header("3. Configuration")
         
-        try:
-            pdf_bytes = create_pdf_from_text(st.session_state.result_text)
-            st.download_button(
-                label="📄 Download as PDF",
-                data=pdf_bytes,
-                file_name="generated_document.pdf",
-                mime="application/pdf",
-            )
-        except Exception as e:
-            st.warning(f"Could not generate PDF: {e}")
+        language = "English"
+        if task_mode == "Generate Exam Paper":
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                language = st.selectbox("Language", ["English", "Hindi", "Both (Bilingual)"])
+            with col2:
+                instructions = st.text_area(
+                    "Instructions", 
+                    placeholder="e.g., Chapter 5, 50 marks, Hard difficulty, 5 MCQs, 3 Long Qs",
+                    height=150
+                )
+        else:
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                language = st.selectbox("Language", ["English", "Hindi", "Both (Bilingual)"])
+            with col2:
+                instructions = st.text_area(
+                    f"Instructions / {'Prompt' if task_mode == 'Summarize Chapter' else 'Question'}", 
+                    placeholder="Type your prompt or question here...",
+                    height=150
+                )
+            
+        button_text = "Generate Paper" if task_mode == "Generate Exam Paper" else ("Summarize" if task_mode == "Summarize Chapter" else "Find Answer")
         
-        st.markdown(st.session_state.result_text)
-        
-    st.markdown("---")
-    st.markdown(
-        """
-        <div style="text-align: center; color: gray; font-size: 0.9em;">
-            <p><b>© 2026 GGSSS Morak Station | Developed by Ashwani Goyal</b></p>
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
+        if st.button(button_text, type="primary"):
+            if not selected_subject_id:
+                st.error("Please select a valid subject/book from the sidebar.")
+            elif not instructions.strip():
+                st.error("Please provide instructions or a question.")
+            else:
+                try:
+                    book_folder_name = selected_subject_name.replace(".zip", "")
+                    extract_dir = os.path.join(VECTOR_STORE_DIR, book_folder_name)
+                    
+                    # 1. Check if FAISS exists locally, otherwise download ZIP and extract
+                    if not (os.path.exists(extract_dir) and os.path.exists(os.path.join(extract_dir, "index.faiss"))):
+                        with st.spinner("Downloading pre-processed vector text from Drive..."):
+                            zip_path = download_file_from_drive(service, selected_subject_id, selected_subject_name)
+                        
+                        with st.spinner("Extracting vector store..."):
+                            os.makedirs(extract_dir, exist_ok=True)
+                            db = load_faiss_from_zip(zip_path, extract_dir)
+                            
+                        # Clean up temp zip file
+                        if os.path.exists(zip_path):
+                            os.remove(zip_path)
+                    else:
+                        with st.spinner("Loading local vector store..."):
+                            gemini_keys = get_gemini_keys()
+                            embeddings = GoogleGenerativeAIEmbeddings(
+                                model="models/text-embedding-004",
+                                google_api_key=gemini_keys[0]
+                            )
+                            db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
+                        
+                    # 2. Retrieve Relevant Chunks
+                    with st.spinner("Retrieving relevant context..."):
+                        k_val = 15 if task_mode != "Ask a Question" else 5
+                        docs = db.similarity_search(instructions, k=k_val)
+                        context_text = "\n\n".join([doc.page_content for doc in docs])
+                    
+                    # 3. Generate Output using Hybrid Engine
+                    with st.spinner("Generating response with AI Engine..."):
+                        result = process_hybrid_ai(task_mode, instructions, language, context_text)
+                        if result:
+                            st.session_state.result_text = result
+                            
+                except Exception as e:
+                    st.error(f"An error occurred: {e}")
+
+        # Show result
+        if st.session_state.result_text:
+            st.markdown("---")
+            st.subheader(f"{task_mode} Result")
+            
+            try:
+                pdf_bytes = create_pdf_from_text(st.session_state.result_text)
+                st.download_button(
+                    label="📄 Download as PDF",
+                    data=pdf_bytes,
+                    file_name="generated_document.pdf",
+                    mime="application/pdf",
+                )
+            except Exception as e:
+                st.warning(f"Could not generate PDF correctly. Ensure 'NotoSansDevanagari-Regular.ttf' is in the root directory. Error: {e}")
+            
+            st.markdown(st.session_state.result_text)
 
 if __name__ == "__main__":
     main()
