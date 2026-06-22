@@ -46,14 +46,19 @@ load_dotenv()
 SCOPES = ['https://www.googleapis.com/auth/drive']
 CREDENTIALS_FILE = "credentials.json"
 VECTOR_STORE_DIR = "vector_store"
-EMBEDDING_MODEL = "models/text-embedding-004"  # ✓ Verified working model with Google Generative AI v1beta
+
+# Embedding configuration - Google API has issues, so use HuggingFace as primary
+USE_HUGGINGFACE_EMBEDDINGS = True  # ✓ Reliable, no API key needed
+EMBEDDING_MODEL_GOOGLE = "models/text-embedding-004"
+EMBEDDING_MODEL_HF = "all-MiniLM-L6-v2"  # Free, fast, reliable embedding model
+
 os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
 
 # Streamlit Cache Management
 @st.cache_resource
 def get_cache_key():
     """Generate unique cache key to bust old caches"""
-    return "cache_v2_embedding_004_2026"
+    return "cache_v3_hf_embeddings_2026"  # Changed to HF version
 
 # Clear old cache automatically if needed
 if "cache_busted" not in st.session_state:
@@ -128,31 +133,65 @@ def handle_embedding_error(error):
     else:
         return f"❌ Embedding Error: {error}"
 
-# --- Model Validation ---
+# --- Model Validation & Initialization ---
 @st.cache_resource(show_spinner=False)
-def validate_embedding_model(api_key):
-    """Validate that the embedding model works with the current API key and library versions"""
+def get_embeddings():
+    """Get embeddings model - HuggingFace as primary (no API issues), Google as fallback"""
     try:
-        test_embeddings = GoogleGenerativeAIEmbeddings(
-            model=EMBEDDING_MODEL,
-            google_api_key=api_key
-        )
-        # Test with a simple query
-        test_result = test_embeddings.embed_query("test")
-        if test_result and len(test_result) > 0:
+        if USE_HUGGINGFACE_EMBEDDINGS:
+            from langchain_huggingface import HuggingFaceEmbeddings
+            embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_HF)
             return {
                 "valid": True,
-                "model": EMBEDDING_MODEL,
-                "embedding_dimension": len(test_result),
-                "message": f"✅ Embedding model validated: {EMBEDDING_MODEL} ({len(test_result)} dimensions)"
+                "type": "HuggingFace",
+                "model": EMBEDDING_MODEL_HF,
+                "embeddings": embeddings,
+                "message": f"✅ Using HuggingFace embeddings ({EMBEDDING_MODEL_HF}) - No API issues!"
             }
-    except Exception as e:
-        error_msg = str(e)
+    except Exception as hf_error:
+        pass
+    
+    # Fallback: Try Google Generative AI embeddings
+    try:
+        gemini_keys = get_gemini_keys()
+        if gemini_keys:
+            test_embeddings = GoogleGenerativeAIEmbeddings(
+                model=EMBEDDING_MODEL_GOOGLE,
+                google_api_key=gemini_keys[0]
+            )
+            test_result = test_embeddings.embed_query("test")
+            if test_result and len(test_result) > 0:
+                return {
+                    "valid": True,
+                    "type": "Google",
+                    "model": EMBEDDING_MODEL_GOOGLE,
+                    "embeddings": test_embeddings,
+                    "message": f"✅ Using Google embeddings ({EMBEDDING_MODEL_GOOGLE})"
+                }
+    except Exception as google_error:
+        pass
+    
+    # No working embeddings found
+    return {
+        "valid": False,
+        "type": "None",
+        "model": None,
+        "embeddings": None,
+        "message": "❌ No working embedding model found. Install with: pip install sentence-transformers"
+    }
+
+@st.cache_resource(show_spinner=False)
+def validate_embedding_model(api_key=None):
+    """Validate embedding models - returns validation result with HF as primary"""
+    result = get_embeddings()
+    if result["valid"]:
+        return result
+    else:
         return {
             "valid": False,
-            "model": EMBEDDING_MODEL,
-            "error": error_msg,
-            "message": f"❌ Embedding validation failed: {handle_embedding_error(e)}"
+            "model": None,
+            "error": "No working embeddings",
+            "message": result["message"]
         }
 
 # --- Clear Old Vector Stores ---
@@ -246,17 +285,13 @@ def download_file_from_drive(service, file_id, file_name):
 
 # --- RAG & Vector Store Logic ---
 def create_and_save_faiss(pdf_path, save_dir):
-    gemini_keys = get_gemini_keys()
-    if not gemini_keys:
-        raise ValueError("GEMINI_API_KEY is required for embeddings.")
+    """Create FAISS vector store from PDF using auto-detected embeddings"""
+    embedding_result = get_embeddings()
     
-    try:
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model=EMBEDDING_MODEL,
-            google_api_key=gemini_keys[0]
-        )
-    except Exception as e:
-        raise Exception(handle_embedding_error(e))
+    if not embedding_result["valid"]:
+        raise ValueError(f"❌ {embedding_result['message']}")
+    
+    embeddings = embedding_result["embeddings"]
     
     loader = PyPDFLoader(pdf_path)
     pages = loader.load()
@@ -264,36 +299,27 @@ def create_and_save_faiss(pdf_path, save_dir):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
     chunks = text_splitter.split_documents(pages)
     
-    try:
-        db = FAISS.from_documents(chunks, embeddings)
-    except Exception as e:
-        raise Exception(handle_embedding_error(e))
-    
+    db = FAISS.from_documents(chunks, embeddings)
     os.makedirs(save_dir, exist_ok=True)
     db.save_local(save_dir)
     return db
 
 @st.cache_resource(show_spinner=False)
 def load_faiss_from_zip(_zip_path, extract_dir):
+    """Load FAISS from ZIP with auto-detected embeddings"""
     with zipfile.ZipFile(_zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_dir)
-        
-    gemini_keys = get_gemini_keys()
-    try:
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model=EMBEDDING_MODEL,
-            google_api_key=gemini_keys[0]
-        )
-    except Exception as e:
-        raise Exception(handle_embedding_error(e))
+    
+    embedding_result = get_embeddings()
+    
+    if not embedding_result["valid"]:
+        raise ValueError(f"❌ {embedding_result['message']}")
+    
+    embeddings = embedding_result["embeddings"]
     
     # allow_dangerous_deserialization=True is required to load FAISS indices, 
     # but since we generated them ourselves, it is safe.
-    try:
-        db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
-    except Exception as e:
-        raise Exception(handle_embedding_error(e))
-    
+    db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
     return db
 
 # --- Hybrid AI Engine ---
@@ -426,24 +452,23 @@ def main():
         return
     
     # Validate embedding model (CRITICAL - this prevents 404 errors)
-    if gemini_keys:
-        validation = validate_embedding_model(gemini_keys[0])
-        if not validation["valid"]:
-            st.error(validation["message"])
-            st.warning("⚠️ The embedding model is not working. This could be due to:")
-            st.warning("1. Old cached Streamlit data (clear browser cache)")
-            st.warning("2. API key doesn't have embeddings enabled")
-            st.warning("3. Incompatible library versions (try: pip install --upgrade google-generativeai langchain-google-genai)")
-            st.warning("4. Old vector stores created with incompatible model (regenerate by re-uploading PDFs)")
-            
-            # Show debug info
-            with st.expander("🔧 Debug Information"):
-                st.write(f"Model: {validation['model']}")
-                st.write(f"Error: {validation['error']}")
-            return
-        else:
-            # Store validation result in session for reference
-            st.session_state.embedding_valid = True
+    validation = validate_embedding_model()
+    if not validation["valid"]:
+        st.error(validation["message"])
+        st.warning("⚠️ Embedding model not working. Solutions:")
+        st.warning("1. Install sentence-transformers: pip install sentence-transformers torch")
+        st.warning("2. Or update libraries: pip install --upgrade -r requirements.txt")
+        st.warning("3. Clear cache: rmdir /s %userprofile%\\.streamlit\\cache")
+        
+        # Show debug info
+        with st.expander("🔧 Debug Information"):
+            st.write(f"Type: {validation.get('type', 'None')}")
+            st.write(f"Message: {validation.get('message', 'Unknown')}")
+        return
+    else:
+        # Store validation result in session for reference
+        st.session_state.embedding_valid = True
+        st.session_state.embedding_type = validation.get('type', 'Unknown')
 
     drive_folder_id = get_drive_folder_id()
     if not drive_folder_id:
@@ -636,15 +661,11 @@ def main():
                             os.remove(zip_path)
                     else:
                         with st.spinner("Loading local vector store..."):
-                            gemini_keys = get_gemini_keys()
-                            try:
-                                embeddings = GoogleGenerativeAIEmbeddings(
-                                    model=EMBEDDING_MODEL,
-                                    google_api_key=gemini_keys[0]
-                                )
-                                db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
-                            except Exception as e:
-                                raise Exception(handle_embedding_error(e))
+                            embedding_result = get_embeddings()
+                            if not embedding_result["valid"]:
+                                raise Exception(embedding_result["message"])
+                            embeddings = embedding_result["embeddings"]
+                            db = FAISS.load_local(extract_dir, embeddings, allow_dangerous_deserialization=True)
                         
                     # 2. Retrieve Relevant Chunks
                     with st.spinner("Retrieving relevant context..."):
